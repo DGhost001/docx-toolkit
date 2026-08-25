@@ -1,0 +1,31 @@
+[project]
+name = "docx-toolkit"
+version = "0.1.0"
+description = "Generic docx read/write/create toolkit for AI agents (compact JSON CLI over python-docx)"
+requires-python = ">=3.9"
+dependencies = [
+    "python-docx>=1.2.0",
+    "Pillow>=10.0",
+]
+
+[project.scripts]
+docxtool = "docx_toolkit.cli:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["docx_toolkit*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["docx_toolkit"]
