@@ -7,8 +7,11 @@ description: Read, edit, and create Microsoft Word (.docx) files without losing 
 
 A CLI over `python-docx` for agents to work with `.docx` files directly,
 without going through a lossy markdown/pandoc round-trip. It never touches
-`styles.xml` or document theme when editing an existing file, and edits
-preserve run-level formatting (bold/italic/etc.) instead of collapsing it.
+`styles.xml` or document theme when editing an existing file — except that
+`index-add` will create the `index 1`/`index 2`/`index 3` paragraph styles
+if the document doesn't already define them (needed for a rendered dynamic
+index); no other command touches styles.xml. Edits otherwise preserve
+run-level formatting (bold/italic/etc.) instead of collapsing it.
 
 All output is **compact JSON on stdout, one object per call**. There is no
 human-readable mode. On failure, stdout is `{"error": "...", "type": "..."}`
@@ -367,6 +370,11 @@ docxtool para-add draft.docx "Report Title" --style "Title"
   - `test_p4.py` — CLI subcommands for copy-block, move-block,
     table-fill, validate, diff; advanced diff (character-level);
     template support stubs; auto-numbering continuation
+  - `test_p5.py` — Word field support: add_field, add_xe (hidden index
+    entries), add_index (dynamic INDEX span + index N styles), validate
+    field-structure checks
+  - `test_p6.py` — CLI subcommands for field-add, xe-add, index-add;
+    batch chaining of the same ops via `$var` refs
 
 ## New commands reference
 
@@ -387,3 +395,7 @@ docxtool para-add draft.docx "Report Title" --style "Title"
 | `diff <path1> <path2>` | Compare two documents — returns `{added, removed, modified}` |
 | Batch `copy_block` / `move_block` | Copy or move blocks between positions |
 | Batch `table_fill` | Bulk-fill table cells from 2D array or CSV |
+| `field-add <path> <id> --instr "..."` | Insert a generic Word field (begin/instrText/end) inline at a paragraph (TOC, REF, PAGEREF, XE, ...) |
+| `xe-add <path> <id> --term "..." [--see "..."]` | Insert a hidden `XE` index-entry field; `--term "parent:sub"` nests, `--see` adds a cross-reference |
+| `index-add <path> --after <id> [--entries JSON] [--xe-pairs JSON]` | Build a dynamic `INDEX` field span (open+cache+close) with explicit, caller-supplied entries/anchors — no heuristic placement |
+| Batch `add_field` / `add_xe` / `add_index` | Same three ops available in batch mode, chainable via `$var` refs |

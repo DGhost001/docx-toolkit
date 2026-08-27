@@ -1,3 +1,4 @@
+from docx.oxml.ns import qn
 from docx import Document as RawDocument
 
 from docx_toolkit import DocxDocument
@@ -81,3 +82,61 @@ def test_full_roundtrip_of_all_content_types(blank_doc: DocxDocument, tmp_path, 
     assert reopened.get_table(tbl)["cells"] == [["Key", "Value"]]
     assert "Header" in [b["tx"] for b in reopened.get_header(0)["blocks"] if b["ty"] == "p"]
     assert "Footer" in [b["tx"] for b in reopened.get_footer(0)["blocks"] if b["ty"] == "p"]
+
+
+def test_index_field_survives_save_and_reopen(blank_doc: DocxDocument, doc_path):
+    p0 = blank_doc.add_paragraph("Discussing foo here.")
+    heading_id = blank_doc.add_paragraph("Index")
+    open_id = blank_doc.add_index(
+        after=heading_id,
+        entries=[(1, "alpha", "1")],
+        xe_pairs=[{"block_id": p0, "term": "foo", "level": 1, "page": "1"}],
+    )
+
+    blank_doc.save(doc_path)
+    reopened = DocxDocument.open(doc_path)
+
+    blocks = reopened.read()["blocks"]
+    assert len(blocks) == 6  # p0 + heading + open + 2 cache (entries + xe_pairs) + close
+
+    _tag, p0_el = reopened._get_block(reopened._document.element.body, p0)
+    assert [t.text for t in p0_el.findall(".//" + qn("w:instrText"))] == [' XE "foo" ']
+
+    _tag, open_p = reopened._get_block(reopened._document.element.body, open_id)
+    _tag, close_p = reopened._get_block(
+        reopened._document.element.body, open_id + 3
+    )
+    open_fld_types = [
+        f.get(qn("w:fldCharType")) for f in open_p.findall(".//" + qn("w:fldChar"))
+    ]
+    close_fld_types = [
+        f.get(qn("w:fldCharType")) for f in close_p.findall(".//" + qn("w:fldChar"))
+    ]
+    assert open_fld_types == ["begin", "separate"]
+    assert close_fld_types == ["end"]
+
+    assert reopened.validate()["valid"] is True
+
+
+def test_index_styles_survive_save_and_reopen(blank_doc: DocxDocument, doc_path):
+    heading_id = blank_doc.add_paragraph("Index")
+    blank_doc.add_index(after=heading_id, entries=[(1, "foo", "1")])
+
+    blank_doc.save(doc_path)
+    reopened = DocxDocument.open(doc_path)  # must not raise on malformed style XML
+
+    names = {s["name"] for s in reopened.list_styles()}
+    assert {"index 1", "index 2", "index 3"} <= names
+
+
+def test_expect_hash_unaffected_by_styles_xml_mutation(blank_doc: DocxDocument):
+    heading_id = blank_doc.add_paragraph("Index")
+    blank_doc.add_index(after=heading_id, entries=[(1, "foo", "1")])
+    hash_after_styles_created = blank_doc.content_hash
+
+    # A second add_index reuses the already-created styles (no styles.xml
+    # write this time) -- expect_hash from just before it must still apply,
+    # proving styles.xml writes never factor into content_hash.
+    blank_doc.add_index(
+        after=heading_id, entries=[(1, "bar", "2")], expect_hash=hash_after_styles_created
+    )

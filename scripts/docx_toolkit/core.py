@@ -292,11 +292,80 @@ class DocxDocument:
                 except Exception as e:
                     errors.append(f"table {b['id']} validation error: {e}")
 
+        self._validate_fields(errors, warnings)
+
         return {
             "valid": len(errors) == 0,
             "errors": errors,
             "warnings": warnings,
         }
+
+    def _validate_fields(self, errors: list, warnings: list) -> None:
+        """Check Word field structure (fldChar/instrText) in the body.
+
+        No-ops entirely when there are no fields, preserving current
+        behavior for documents with none. Only the body is inspected --
+        header/footer field structure is a known v1 scoping gap.
+        """
+        body = self._document.element.body
+        fld_chars = body.findall(".//" + qn("w:fldChar"))
+        if not fld_chars:
+            return
+
+        begins = [f for f in fld_chars if f.get(qn("w:fldCharType")) == "begin"]
+        ends = [f for f in fld_chars if f.get(qn("w:fldCharType")) == "end"]
+        if len(begins) != len(ends):
+            errors.append(f"unbalanced field begin/end: {len(begins)} begin, {len(ends)} end")
+
+        instr_texts = [t.text or "" for t in body.findall(".//" + qn("w:instrText"))]
+        index_instrs = [t for t in instr_texts if t.strip().startswith("INDEX")]
+        if len(index_instrs) != 1:
+            errors.append(f"expected exactly one INDEX field instruction, found {len(index_instrs)}")
+            return
+
+        self._validate_index_span(body, errors)
+
+    def _validate_index_span(self, body, errors: list) -> None:
+        paragraphs = body.findall(qn("w:p"))
+        open_idx = None
+        for i, p in enumerate(paragraphs):
+            for t in p.findall(".//" + qn("w:instrText")):
+                if (t.text or "").strip().startswith("INDEX"):
+                    open_idx = i
+                    break
+            if open_idx is not None:
+                break
+        if open_idx is None:
+            return  # unreachable given the caller's count check, defensive only
+
+        # Track begin/end nesting depth from the open paragraph forward; the
+        # close paragraph is wherever depth first returns to zero. This
+        # correctly skips over any extraneous begin+end pairs (e.g. a stray
+        # XE field) injected into an intervening cache paragraph, rather than
+        # mistaking the first "end" fldChar found for the real close.
+        close_idx = None
+        depth = 0
+        for j in range(open_idx, len(paragraphs)):
+            for f in paragraphs[j].findall(".//" + qn("w:fldChar")):
+                fld_type = f.get(qn("w:fldCharType"))
+                if fld_type == "begin":
+                    depth += 1
+                elif fld_type == "end":
+                    depth -= 1
+                    if depth == 0:
+                        close_idx = j
+                        break
+            if close_idx is not None:
+                break
+
+        if close_idx is None or close_idx == open_idx:
+            errors.append("INDEX field's end fldChar must be in a distinct, later sibling paragraph")
+            return
+
+        for k in range(open_idx + 1, close_idx):
+            for t in paragraphs[k].findall(".//" + qn("w:instrText")):
+                if (t.text or "").strip().startswith("XE"):
+                    errors.append(f"XE field found inside INDEX span (paragraph index {k})")
 
     @staticmethod
     def diff(doc1: "DocxDocument", doc2: "DocxDocument") -> dict[str, list[dict[str, Any]]]:
@@ -609,6 +678,139 @@ class DocxDocument:
 
         return new_abstract_id
 
+    # -- dynamic index -----------------------------------------------------
+
+    _INDEX_STYLE_INDENTS = {"index 1": 220, "index 2": 440, "index 3": 660}
+
+    def _ensure_index_styles(self) -> None:
+        """Create the index 1/2/3 paragraph styles if the document lacks them.
+
+        Narrow, opt-in exception to the "never touches styles.xml" contract
+        (see SKILL.md) -- only add_index calls this, never add_field/add_xe.
+        The styleId string ("index 1", with a literal space) must match the
+        pStyle references built in _cache_paragraph verbatim.
+        """
+        styles_el = self._document.styles.element
+        existing_ids = {s.get(qn("w:styleId")) for s in styles_el.findall(qn("w:style"))}
+        for style_id, left in self._INDEX_STYLE_INDENTS.items():
+            if style_id in existing_ids:
+                continue
+            style_el = etree.SubElement(styles_el, qn("w:style"))
+            style_el.set(qn("w:type"), "paragraph")
+            style_el.set(qn("w:styleId"), style_id)
+            etree.SubElement(style_el, qn("w:name")).set(qn("w:val"), style_id)
+            etree.SubElement(style_el, qn("w:basedOn")).set(qn("w:val"), "Normal")
+            pPr = etree.SubElement(style_el, qn("w:pPr"))
+            ind = etree.SubElement(pPr, qn("w:ind"))
+            ind.set(qn("w:left"), str(left))
+            ind.set(qn("w:hanging"), "220")
+            tabs = etree.SubElement(pPr, qn("w:tabs"))
+            tab = etree.SubElement(tabs, qn("w:tab"))
+            tab.set(qn("w:val"), "right")
+            tab.set(qn("w:leader"), "dot")
+            tab.set(qn("w:pos"), "4448")
+
+    def _index_instruction(self, collapsed: str, locale: str) -> str:
+        return f' INDEX \\e "\\t" \\c "{collapsed}" \\z "{locale}" '
+
+    def _cache_paragraph(
+        self, level: int, term: str, page_text: str, main_style: str, sub_style: str
+    ):
+        style = main_style if level == 1 else (sub_style if level == 2 else "index 3")
+        p = etree.Element(qn("w:p"))
+        pPr = etree.SubElement(p, qn("w:pPr"))
+        etree.SubElement(pPr, qn("w:pStyle")).set(qn("w:val"), style)
+        tabs = etree.SubElement(pPr, qn("w:tabs"))
+        tab = etree.SubElement(tabs, qn("w:tab"))
+        tab.set(qn("w:val"), "right")
+        tab.set(qn("w:leader"), "dot")
+        tab.set(qn("w:pos"), "4448")
+        r = etree.SubElement(p, qn("w:r"))
+        t1 = etree.SubElement(r, qn("w:t"))
+        t1.set(qn("xml:space"), "preserve")
+        t1.text = term
+        etree.SubElement(r, qn("w:tab"))
+        t2 = etree.SubElement(r, qn("w:t"))
+        t2.set(qn("xml:space"), "preserve")
+        t2.text = page_text
+        return p
+
+    def add_index(
+        self,
+        after: int,
+        entries: list[tuple[int, str, str]] | None = None,
+        xe_pairs: list[dict[str, Any]] | None = None,
+        collapsed: str = "2",
+        locale: str = "1033",
+        main_style: str = "index 1",
+        sub_style: str = "index 2",
+        container: str = "body",
+        section: int = 0,
+        expect_hash: str | None = None,
+    ) -> int:
+        """Build a dynamic INDEX field: open + cached entries + close.
+
+        ``entries`` is a list of ``(level, term, page_text)`` tuples seeding
+        the visual cache render. ``xe_pairs`` is a list of dicts
+        ``{"block_id", "term", "see"?, "level", "page"}`` -- each places a
+        hidden XE field at the given paragraph (via add_xe) *and* seeds a
+        matching cache entry. entries-derived cache paragraphs come first,
+        followed by xe_pairs-derived ones. Returns the open paragraph's
+        block_id. No heuristic placement: callers supply exact anchors.
+        """
+        self._check_hash(expect_hash)
+        self._ensure_index_styles()
+
+        container_el = self._container_element(container, section)
+        _tag, anchor_el = self._get_block(container_el, after)
+
+        for pair in xe_pairs or []:
+            try:
+                xe_block_id = pair["block_id"]
+                xe_term = pair["term"]
+            except KeyError as exc:
+                raise DocxError(f"xe_pairs entry missing required key: {exc}") from None
+            self.add_xe(
+                xe_block_id,
+                xe_term,
+                see=pair.get("see"),
+                container=container,
+                section=section,
+            )
+
+        open_p = etree.Element(qn("w:p"))
+        r1 = etree.SubElement(open_p, qn("w:r"))
+        etree.SubElement(r1, qn("w:fldChar")).set(qn("w:fldCharType"), "begin")
+        r2 = etree.SubElement(open_p, qn("w:r"))
+        instr_el = etree.SubElement(r2, qn("w:instrText"))
+        instr_el.set(qn("xml:space"), "preserve")
+        instr_el.text = self._index_instruction(collapsed, locale)
+        r3 = etree.SubElement(open_p, qn("w:r"))
+        etree.SubElement(r3, qn("w:fldChar")).set(qn("w:fldCharType"), "separate")
+
+        cache = []
+        for level, term, page_text in entries or []:
+            cache.append(self._cache_paragraph(level, term, page_text, main_style, sub_style))
+        for pair in xe_pairs or []:
+            try:
+                level = pair["level"]
+                page_text = pair["page"]
+            except KeyError as exc:
+                raise DocxError(f"xe_pairs entry missing required key: {exc}") from None
+            cache.append(self._cache_paragraph(level, pair["term"], page_text, main_style, sub_style))
+
+        close_p = etree.Element(qn("w:p"))
+        rc = etree.SubElement(close_p, qn("w:r"))
+        etree.SubElement(rc, qn("w:fldChar")).set(qn("w:fldCharType"), "end")
+
+        span = [open_p] + cache + [close_p]
+        anchor = anchor_el
+        for el in span:
+            anchor.addnext(el)
+            anchor = el
+
+        return self._block_index_of(container_el, open_p)
+
     def add_paragraphs(
         self,
         items: list[dict[str, str | None]],
@@ -689,6 +891,93 @@ class DocxDocument:
             prev_p = p
             new_ids.append(self._block_index_of(container_el, p._p))
         return new_ids
+
+    # -- fields ----------------------------------------------------------
+
+    @staticmethod
+    def _escape_field_text(s: str) -> str:
+        return s.replace("\\", "\\\\").replace('"', '\\"')
+
+    def _field_runs(self, instruction: str) -> list:
+        r1 = etree.Element(qn("w:r"))
+        f1 = etree.SubElement(r1, qn("w:fldChar"))
+        f1.set(qn("w:fldCharType"), "begin")
+
+        r2 = etree.Element(qn("w:r"))
+        instr = etree.SubElement(r2, qn("w:instrText"))
+        instr.set(qn("xml:space"), "preserve")
+        instr.text = instruction
+
+        r3 = etree.Element(qn("w:r"))
+        f3 = etree.SubElement(r3, qn("w:fldChar"))
+        f3.set(qn("w:fldCharType"), "end")
+
+        return [r1, r2, r3]
+
+    def add_field(
+        self,
+        block_id: int,
+        instruction: str,
+        after: int | None = None,
+        container: str = "body",
+        section: int = 0,
+        mode: str = "inline",
+        expect_hash: str | None = None,
+    ) -> int:
+        """Insert a Word field (begin/instrText/end triplet) inline in a paragraph.
+
+        ``after`` has no effect in ``mode="inline"`` -- the field is always
+        placed in ``block_id``'s own paragraph, prepended before any existing
+        runs so visible text is untouched. ``mode="inline"`` is the only
+        supported mode; see ``add_index`` for the multi-paragraph INDEX span.
+        """
+        self._check_hash(expect_hash)
+        if mode != "inline":
+            raise DocxError(f"unsupported field mode: {mode!r}")
+        container_el = self._container_element(container, section)
+        _tag, p_el = self._get_block(container_el, block_id, expected_tag="p")
+
+        runs = self._field_runs(instruction)
+        existing_runs = p_el.findall(qn("w:r"))
+        if existing_runs:
+            for r in runs:
+                existing_runs[0].addprevious(r)
+        else:
+            for r in runs:
+                p_el.append(r)
+
+        return block_id
+
+    def add_xe(
+        self,
+        block_id: int,
+        term: str,
+        see: str | None = None,
+        after: int | None = None,
+        container: str = "body",
+        section: int = 0,
+        expect_hash: str | None = None,
+    ) -> int:
+        """Insert a hidden inline XE (index-entry) field at paragraph block_id.
+
+        ``term`` may use ``"parent:sub"`` colon notation for a sub-entry --
+        this is opaque to the toolkit, passed through verbatim for Word to
+        interpret on field update. ``see`` adds a ``\\t "See ..."``
+        cross-reference switch. The ``\\r "bookmark"`` range switch is not a
+        parameter here; use ``add_field`` directly for that case.
+        """
+        escaped_term = self._escape_field_text(term)
+        if see is not None:
+            instruction = f' XE "{escaped_term}" \\t "See {self._escape_field_text(see)}" '
+        else:
+            instruction = f' XE "{escaped_term}" '
+        return self.add_field(
+            block_id,
+            instruction,
+            container=container,
+            section=section,
+            expect_hash=expect_hash,
+        )
 
     def edit_paragraph(
         self,

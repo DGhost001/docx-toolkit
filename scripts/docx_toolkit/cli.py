@@ -212,6 +212,45 @@ def build_parser() -> argparse.ArgumentParser:
     _add_container_args(p)
     _add_expect_hash_arg(p)
 
+    # field-add
+    p = sub.add_parser("field-add")
+    p.add_argument("path")
+    p.add_argument("block_id", type=int)
+    p.add_argument("--instr", required=True, dest="instruction")
+    p.add_argument("--after", type=int, default=None)
+    p.add_argument("--mode", default="inline")
+    _add_container_args(p)
+    _add_expect_hash_arg(p)
+
+    # xe-add
+    p = sub.add_parser("xe-add")
+    p.add_argument("path")
+    p.add_argument("block_id", type=int)
+    p.add_argument("--term", required=True)
+    p.add_argument("--see", default=None)
+    p.add_argument("--after", type=int, default=None)
+    _add_container_args(p)
+    _add_expect_hash_arg(p)
+
+    # index-add
+    p = sub.add_parser("index-add")
+    p.add_argument("path")
+    p.add_argument("--after", type=int, required=True)
+    p.add_argument(
+        "--entries", type=_json_value, default=None,
+        help='JSON array of [level, term, page_text] triples',
+    )
+    p.add_argument(
+        "--xe-pairs", type=_json_value, default=None, dest="xe_pairs",
+        help='JSON array of {"block_id":.., "term":.., "see":.., "level":.., "page":..}',
+    )
+    p.add_argument("--collapsed", default="2")
+    p.add_argument("--locale", default="1033")
+    p.add_argument("--style-main", default="index 1", dest="main_style")
+    p.add_argument("--style-sub", default="index 2", dest="sub_style")
+    _add_container_args(p)
+    _add_expect_hash_arg(p)
+
     # validate
     p = sub.add_parser("validate")
     p.add_argument("path")
@@ -250,6 +289,9 @@ _MUTATING_COMMANDS = {
     "copy-block",
     "move-block",
     "table-fill",
+    "field-add",
+    "xe-add",
+    "index-add",
 }
 
 
@@ -421,6 +463,43 @@ def _dispatch(doc: DocxDocument, command: str, args: argparse.Namespace) -> dict
             expect_hash=args.expect_hash,
         )
         return {"hash": doc.content_hash}
+    if command == "field-add":
+        new_id = doc.add_field(
+            args.block_id,
+            args.instruction,
+            after=args.after,
+            container=args.container,
+            section=args.section,
+            mode=args.mode,
+            expect_hash=args.expect_hash,
+        )
+        return {"id": new_id, "hash": doc.content_hash}
+    if command == "xe-add":
+        new_id = doc.add_xe(
+            args.block_id,
+            args.term,
+            see=args.see,
+            after=args.after,
+            container=args.container,
+            section=args.section,
+            expect_hash=args.expect_hash,
+        )
+        return {"id": new_id, "hash": doc.content_hash}
+    if command == "index-add":
+        entries = [tuple(e) for e in args.entries] if args.entries else None
+        new_id = doc.add_index(
+            args.after,
+            entries=entries,
+            xe_pairs=args.xe_pairs,
+            collapsed=args.collapsed,
+            locale=args.locale,
+            main_style=args.main_style,
+            sub_style=args.sub_style,
+            container=args.container,
+            section=args.section,
+            expect_hash=args.expect_hash,
+        )
+        return {"id": new_id, "hash": doc.content_hash}
     if command == "validate":
         result = doc.validate()
         return result
